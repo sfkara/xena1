@@ -1,34 +1,22 @@
 from pyimagesearch.motion_detection import SingleMotionDetector
 from imutils.video import VideoStream
-from flask import Flask,render_template,flash,redirect,url_for,session,logging,request,Response
-from flaskext.mysql import MySQL
-from pymysql.cursors import DictCursor
-from wtforms import Form,StringField,TextAreaField,PasswordField,validators
-from passlib.hash import sha256_crypt
+from flask import Flask, render_template, flash, redirect, url_for, session, logging, request, Response
+from flask_wtf import *
+from flask_bcrypt import Bcrypt
+from itsdangerous import TimedJSONWebSignatureSerializer as Serializer
+from wtforms import Form, StringField, TextAreaField, PasswordField, validators
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, UserMixin, login_user, current_user, logout_user, login_required
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField, SubmitField, BooleanField
+from wtforms.validators import DataRequired, Length, Email, EqualTo, ValidationError
+
 import threading
 import argparse
 import datetime
 import imutils
 import time
 import cv2
-
-
-class RegisterForm(Form):
-
-    name = StringField("İsim Soyisim", validators=[validators.Length(
-        min=4, max=25, message="4 ile 25 Arası Karakter Giriniz."), validators.DataRequired(message="Lütfen Bu Alanı Doldurunuz.")])
-    email = StringField("Email Adresi", validators=[validators.DataRequired(
-        message="Lütfen Bu Alanı Doldurunuz."), validators.Email(message="Geçerli Bir Email Adresi Giriniz...")])
-    username = StringField("Kullanıcı Adı", validators=[validators.Length(
-        min=5, max=35), validators.DataRequired(message="Lütfen Bu Alanı Doldurunuz.")])
-    password = PasswordField("Parola", validators=[validators.DataRequired(), validators.EqualTo(
-        fieldname="confirm", message="Parolalar Uyuşmuyor."), validators.DataRequired(message="Lütfen Bu Alanı Doldurunuz.")])
-    confirm = PasswordField("Parola Tekrar")
-
-
-class LoginForm(Form):
-    username = StringField("Kullanıcı adı")
-    password = PasswordField("PAROLA")
 
 
 outputFrame = None
@@ -38,21 +26,62 @@ lock = threading.Lock()
 
 application = Flask(__name__)
 
-application.secret_key = "xena"
-application.config["MYSQL_DATABASE_HOST"] = "localhost"
-application.config["MYSQL_DATABASE_USER"] = "root"
-application.config["MYSQL_DATABASE_PASSWORD"] = ""
-application.config["MYSQL_DATABASE_DB"] = "xena1"
-application.config["MYSQL_CURSORCLASS"] = "DictCursor"
+application.config['SECRET_KEY'] = 'ed0b4eaf3fb47152c77e1f97d9b34d37'
+application.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///xena.db'
+application.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-mysql = MySQL()
-mysql.init_app(application)
+db = SQLAlchemy(application)
+bcrypt = Bcrypt(application)
+
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(20), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    image_file = db.Column(db.String(20), nullable=False,
+                           default='default.jpg')
+    password = db.Column(db.String(60), nullable=False)
+
+    def __repr__(self):
+        return f"User('{self.username}', '{self.email}', '{self.image_file}')"
+
+
+class RegistrationForm(FlaskForm):
+    username = StringField('Username',
+                           validators=[DataRequired(), Length(min=2, max=20)])
+    email = StringField('Email',
+                        validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    confirm_password = PasswordField('Confirm Password',
+                                     validators=[DataRequired(), EqualTo('password')])
+    submit = SubmitField('Sign Up')
+
+    def validate_username(self, username):
+        user = User.query.filter_by(username=username.data).first()
+        if user:
+            raise ValidationError(
+                'That username is taken. Please choose a different one.')
+
+    def validate_email(self, email):
+        user = User.query.filter_by(email=email.data).first()
+        if user:
+            raise ValidationError(
+                'That email is taken. Please choose a different one.')
+
+
+class LoginForm(FlaskForm):
+    email = StringField('Email',
+                        validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    remember = BooleanField('Remember Me')
+    submit = SubmitField('Login')
 
 
 # initialize the video stream and allow the camera sensor to
 # warmup
 #vs = VideoStream(usePiCamera=1).start()
-
+vs = VideoStream(src=0).start()
+time.sleep(2.0)
 
 
 @application.route('/')
@@ -62,8 +91,7 @@ def index():
 
 @application.route('/home')
 def home():
-    vs = VideoStream(src=0).start()
-    time.sleep(2.0)
+
     return render_template('home.html')
 
 
@@ -143,7 +171,6 @@ def generate():
         yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' +
               bytearray(encodedImage) + b'\r\n')
 
-
 @application.route("/video_feed")
 def video_feed():
     # return the response generated along with the specific media
@@ -152,74 +179,54 @@ def video_feed():
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
-# Register
-@application.route('/register', methods=["GET", "POST"])
+@application.route("/register", methods=['GET', 'POST'])
 def register():
-    form = RegisterForm(request.form)
+    form = RegistrationForm()
 
-    if request.method == "POST" and form.validate():
-        name = form.name.data
-        username = form.username.data
-        email = form.email.data
+    if form.validate_on_submit():
+        hashed_password = generate_password_hash(
+            form.password.data, method='sha256')
+        # if User.query.filter_by(username=form.username.data).first() == form.username.data:
+        #     flash("Username already exits!")
+        # else:
+        new_user = User(username=form.username.data,
+                        email=form.email.data, password=hashed_password)
+        db.session.add(new_user)
+        db.session.commit()
+        return redirect(url_for('login'))
 
-        password = sha256_crypt.hash(form.password.data)
-
-        cur = mysql.connection.cursor()
-        mysql.set_character_set('utf8')
-        cur.execute('SET NAMES utf8;')
-        cur.execute('SET CHARACTER SET utf8;')
-        cur.execute('SET character_set_connection=utf8;')
-
-        sorgu = "INSERT INTO users (name,email,username,password) VALUES (%s,%s,%s,%s)"
-
-        cur.execute(sorgu, (name, email, username, password))
-        mysql.connection.commit()
-        cur.close()
-        flash("You have succesfully registered", "success")
-        return redirect(url_for("index"))
     else:
-        return render_template("register.html", form=form)
+        return render_template('register.html')
 
 
-# Login
-@application.route("/login", methods=["GET", "POST"])
+@application.route("/login", methods=['GET', 'POST'])
 def login():
-    form = LoginForm(request.form)
+    if request.method == 'GET':
+        return render_template('login.html')
+    else:
+        u = request.form['username']
+        p = request.form['password']
+        data = User.query.filter_by(username=u, password=p).first()
+        if data is not None:
+            session['logged_in'] = True
+            return redirect(url_for('index'))
+        return render_template('index.html', message="Incorrect Details")
 
-    if request.form == "POST":
-        username = form.username.data
-        password_entered = form.password.data
 
-        cur = mysql.connection.cursor()
-        sorgu = "Select * from users where 'username' = %s"
-        result = cur.execute(sorgu, (username))
-
-        if result > 0:
-            data = cur.fetchone()
-            real_password = data["password"]
-            if sha256_crypt.verify(password_entered, real_password):
-                flash("Başarıyla giriş yapıldı", "succes")
-
-                session["logged_in"] = True
-                session["username"] = username
-
-                return redirect(url_for("/"))
-            else:
-                flash("Parolanızı yanlış girdiniz", "danger")
-                return redirect(url_for("login"))
-        else:
-            flash("Böyle bir kullanıcı yok", "danger")
-            return redirect(url_for("login"))
-    return render_template("login.html", form=form)
-
-#   Logout
-@application.route("/logout")
+@application.route('/logout', methods=['GET', 'POST'])
 def logout():
-    session.clear()
-    return redirect(url_for("index"))
+    session['logged_in'] = False
+    return redirect(url_for('index'))
+
+
+@application.route("/account")
+@login_required
+def account():
+    return render_template('account.html', title='Account')
 
 
 if __name__ == "__main__":
+    db.create_all()
     # construct the argument parser and parse command line arguments
     ap = argparse.ArgumentParser()
     ap.add_argument("-i", "--ip", type=str, required=True,
